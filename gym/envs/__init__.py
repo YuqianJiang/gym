@@ -65,6 +65,11 @@ register(
 )
 
 register(
+    id='CartPoleContinual-v0',
+    entry_point='gym.envs.classic_control:CartPoleContinualEnv'
+)
+
+register(
     id='MountainCar-v0',
     entry_point='gym.envs.classic_control:MountainCarEnv',
     max_episode_steps=200,
