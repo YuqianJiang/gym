@@ -65,8 +65,8 @@ register(
 )
 
 register(
-    id='CartPoleContinual-v0',
-    entry_point='gym.envs.classic_control:CartPoleContinualEnv'
+    id='CartPoleContinuing-v0',
+    entry_point='gym.envs.classic_control:CartPoleContinuingEnv'
 )
 
 register(

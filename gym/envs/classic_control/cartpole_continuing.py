@@ -9,12 +9,14 @@ import gym
 from gym import spaces, logger
 from gym.utils import seeding
 import numpy as np
+import time
 
-class CartPoleContinualEnv(gym.Env):
+class CartPoleContinuingEnv(gym.Env):
     """
     Description:
         A pole is attached by an un-actuated joint to a cart, which moves along a frictionless track. The pendulum starts upright, and the goal is to prevent it from falling over by increasing and reducing the cart's velocity.
-
+        In this continuing version, there is no episode termination. The agent is forced to get the pole back up if it falls and stay in the center of the track.
+    
     Source:
         This environment corresponds to the version of the cart-pole problem described by Barto, Sutton, and Anderson
 
@@ -35,17 +37,13 @@ class CartPoleContinualEnv(gym.Env):
         Note: The amount the velocity that is reduced or increased is not fixed; it depends on the angle the pole is pointing. This is because the center of gravity of the pole increases the amount of energy needed to move the cart underneath it
 
     Reward:
-        Reward is 1 for every step taken, including the termination step
+        Reward is 1 for every step taken if the pole angle is less than or equal to 12 degrees and cart position is less than or equal to 2.4. Reward is 0 otherwise.
 
     Starting State:
         All observations are assigned a uniform random value in [-0.05..0.05]
 
     Episode Termination:
-        Pole Angle is more than 12 degrees
-        Cart Position is more than 2.4 (center of the cart reaches the edge of the display)
-        Episode length is greater than 200
-        Solved Requirements
-        Considered solved when the average reward is greater than or equal to 195.0 over 100 consecutive trials.
+        None
     """
     
     metadata = {
@@ -61,12 +59,16 @@ class CartPoleContinualEnv(gym.Env):
         self.length = 0.5 # actually half the pole's length
         self.polemass_length = (self.masspole * self.length)
         self.force_mag = 10.0
+        #self.known_force_mag = 5.0
         self.tau = 0.02  # seconds between state updates
+        self.known_tau = 0.02
         self.kinematics_integrator = 'euler'
+        self.actions = [-1, 1]
 
         # Angle at which to fail the episode
         self.theta_threshold_radians = 12 * 2 * math.pi / 360
         self.x_threshold = 2.4
+        self.known_x_threshold = 2.4
 
         # Angle limit set to 2 * theta_threshold_radians so failing observation is still within bounds
         high = np.array([
@@ -75,7 +77,7 @@ class CartPoleContinualEnv(gym.Env):
             self.theta_threshold_radians * 2,
             np.finfo(np.float32).max])
 
-        self.action_space = spaces.Discrete(2)
+        self.action_space = spaces.Discrete(len(self.actions))
         self.observation_space = spaces.Box(-high, high, dtype=np.float32)
 
         self.seed()
@@ -92,7 +94,7 @@ class CartPoleContinualEnv(gym.Env):
         assert self.action_space.contains(action), "%r (%s) invalid"%(action, type(action))
         state = self.state
         x, x_dot, theta, theta_dot = state
-        force = self.force_mag if action==1 else -self.force_mag
+        force = self.force_mag * self.actions[action]
         costheta = math.cos(theta)
         sintheta = math.sin(theta)
         temp = (force + self.polemass_length * theta_dot * theta_dot * sintheta) / self.total_mass
@@ -109,46 +111,28 @@ class CartPoleContinualEnv(gym.Env):
             theta_dot = theta_dot + self.tau * thetaacc
             theta = theta + self.tau * theta_dot
 
+        theta = (theta + np.pi) % (2 * np.pi) - np.pi
+        x_dot = max(min(x_dot, 1), -1) # cap velocity at 1
+
         upright =   theta >= -self.theta_threshold_radians \
                     and theta <= self.theta_threshold_radians
         in_x_threshold =    x >= -self.x_threshold \
                             and x <= self.x_threshold
 
-        if in_x_threshold:
-            self.state = (x,x_dot,theta,theta_dot)
+        self.state = (x,x_dot,theta,theta_dot)
         
+        reward = 0
         if upright and in_x_threshold:
             reward = 1.0
-        else:
-            reward = 0.0
 
         done = False
-
-        '''
-        done =  x < -self.x_threshold \
-                or x > self.x_threshold \
-                or theta < -self.theta_threshold_radians \
-                or theta > self.theta_threshold_radians
-        done = bool(done)
-
-        if not done:
-            reward = 1.0
-        elif self.steps_beyond_done is None:
-            # Pole just fell!
-            self.steps_beyond_done = 0
-            reward = 1.0
-        else:
-            if self.steps_beyond_done == 0:
-                logger.warn("You are calling 'step()' even though this environment has already returned done = True. You should always call 'reset()' once you receive 'done = True' -- any further steps are undefined behavior.")
-            self.steps_beyond_done += 1
-            reward = 0.0
-        '''
 
         return np.array(self.state), reward, done, {}
 
     def reset(self):
         self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
         self.steps_beyond_done = None
+        print ("env is reset")
         return np.array(self.state)
 
     def render(self, mode='human'):
@@ -208,3 +192,42 @@ class CartPoleContinualEnv(gym.Env):
         if self.viewer:
             self.viewer.close()
             self.viewer = None
+
+    def get_mask(self, method_type):
+        
+        if method_type == "baseline":
+            action_mask = np.zeros(self.action_space.n)
+        elif method_type == "shield":
+            action_mask = np.zeros(self.action_space.n)
+            for action in range(self.action_space.n):
+                if not self.check_allowed_action(action):
+                    action_mask[action] = -np.inf
+        elif method_type == "shaping":
+            action_mask = np.full(self.action_space.n, -self.get_state_distance())
+            for action in range(self.action_space.n):
+                if self.check_allowed_action(action):
+                    action_mask[action] += 1
+
+        return action_mask
+
+    def get_state_distance(self):
+        x, xdot, theta, thetadot = self.state
+        distance = 0
+        x_p = x + self.known_tau * xdot
+        if x_p < -self.known_x_threshold:
+            distance = (-self.known_x_threshold - x_p) * 100
+        elif x_p > self.known_x_threshold:
+            distance = (x_p - self.known_x_threshold) * 100
+
+        return distance
+
+    def check_allowed_action(self, action):
+        
+        x, xdot, theta, thetadot = self.state
+        allowed = True
+        if (x + self.known_tau * xdot < -self.known_x_threshold) and xdot < 0 and self.actions[action] < 0:
+            allowed = False
+        elif (x + self.known_tau * xdot > self.known_x_threshold) and xdot > 0 and self.actions[action] > 0:
+            allowed = False
+
+        return allowed
